@@ -17,17 +17,31 @@ final class CameraViewModel: ObservableObject {
     private var camera: (any Camera)?
     private var discoveryTask: Task<Void, Never>?
     private var liveViewTask: Task<Void, Never>?
+    private var wantsLiveView = false
+    private var isConnecting = false
+    private var cameraSession = UUID()
 
     func start() {
         guard discoveryTask == nil else { return }
         discoveryTask = Task {
             do {
                 for try await found in discovery.cameras() {
-                    guard camera == nil else { continue }
+                    guard !isConnected, !isConnecting else { continue }
+                    isConnecting = true
+                    cameraSession = UUID()
                     camera = found.camera
                     descriptor = found.descriptor
                     status = "Camera detected — connecting…"
-                    try await connect(found.camera)
+                    do {
+                        try await connect(found.camera)
+                    } catch {
+                        await found.camera.disconnect()
+                        self.camera = nil
+                        descriptor = nil
+                        isConnected = false
+                        show(error)
+                    }
+                    isConnecting = false
                 }
             } catch {
                 show(error)
@@ -63,7 +77,7 @@ final class CameraViewModel: ObservableObject {
         Task {
             defer {
                 isBusy = false
-                if restartLiveView { startLiveView() }
+                if restartLiveView, isConnected { startLiveView() }
             }
             do {
                 let photo = try await camera.capturePhoto(download: true)
@@ -82,6 +96,8 @@ final class CameraViewModel: ObservableObject {
 
     func disconnect() {
         guard let camera else { return }
+        wantsLiveView = false
+        cameraSession = UUID()
         liveViewTask?.cancel()
         liveViewTask = nil
         Task {
@@ -103,14 +119,17 @@ final class CameraViewModel: ObservableObject {
         state = try await camera.state()
         isConnected = true
         status = "Connected"
+        if wantsLiveView { startLiveView() }
     }
 
     private func startLiveView() {
+        wantsLiveView = true
         guard let camera, capabilities.contains(.liveView) else {
             status = "Live view is not supported by this profile"
             return
         }
         liveViewTask = Task {
+            let session = cameraSession
             do {
                 let stream = try await camera.startLiveView()
                 isLiveViewActive = true
@@ -119,15 +138,15 @@ final class CameraViewModel: ObservableObject {
                     guard !Task.isCancelled else { break }
                     liveViewImage = UIImage(data: frame.jpegData)
                 }
-                isLiveViewActive = false
+                if !Task.isCancelled, wantsLiveView { await handleUnexpectedDisconnect(session: session) }
             } catch {
-                isLiveViewActive = false
-                show(error)
+                if !Task.isCancelled, wantsLiveView { await handleUnexpectedDisconnect(error, session: session) }
             }
         }
     }
 
     private func stopLiveView() {
+        wantsLiveView = false
         liveViewTask?.cancel()
         liveViewTask = nil
         guard let camera else { return }
@@ -136,6 +155,20 @@ final class CameraViewModel: ObservableObject {
             isLiveViewActive = false
             status = "Live view stopped"
         }
+    }
+
+    private func handleUnexpectedDisconnect(_ error: Error? = nil, session: UUID) async {
+        guard cameraSession == session, let disconnectedCamera = camera else { return }
+        liveViewTask = nil
+        isLiveViewActive = false
+        isConnected = false
+        state = nil
+        capabilities = []
+        status = error.map { "Connection lost: \($0.localizedDescription) — reconnecting…" }
+            ?? "Connection lost — reconnecting…"
+        camera = nil
+        descriptor = nil
+        Task { await disconnectedCamera.disconnect() }
     }
 
     private func show(_ error: Error) {
