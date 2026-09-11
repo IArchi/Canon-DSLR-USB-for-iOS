@@ -8,6 +8,8 @@ Common Swift `async/await` API for PTP cameras (Canon, Nikon, Sony, and others) 
 - JPEG live view through `AsyncThrowingStream`;
 - simulation without a camera.
 
+Successfully tested on Canon EOS 2000D.
+
 ## Installation
 
 In Xcode, select **File > Add Package Dependencies**, then enter the Git URL of this directory.
